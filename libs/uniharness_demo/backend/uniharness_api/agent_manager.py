@@ -318,6 +318,15 @@ class AgentManager:
             else:
                 output_dir = f"/sessions/{session_key}/{SESSION_OUTPUTS_DIR}"
 
+            # Create SQLite checkpointer for conversation persistence.
+            # Uses the same database as the store layer; checkpoint tables
+            # are auto-created by langgraph-checkpoint-sqlite.
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from uniharness_api.paths import db_path
+
+            checkpointer = AsyncSqliteSaver.from_conn_string(str(db_path()))
+            await checkpointer.setup()
+
             agent = await create_agent(
                 model=main_model,
                 computer=computer,
@@ -327,6 +336,7 @@ class AgentManager:
                 search_provider=search,
                 fetch_provider=fetch,
                 skill_paths=skill_paths,
+                checkpointer=checkpointer,
                 extra_tools=[PresentToUserTool(computer=computer, output_dir=output_dir)],
             )
             self._agents[cache_key] = agent
