@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import uuid
+from contextvars import ContextVar
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -13,8 +16,9 @@ import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from uniharness_api.agent_manager import agent_manager
 from uniharness_api.database import init_db
@@ -25,6 +29,32 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# -- Trace ID ----------------------------------------------------------------
+# Context variable accessible from any async task in the request chain.
+
+_trace_id_var: ContextVar[str] = ContextVar("trace_id", default="")
+
+
+def get_trace_id() -> str:
+    """Return the trace_id for the current request, or empty string."""
+    return _trace_id_var.get()
+
+
+class TraceContextMiddleware(BaseHTTPMiddleware):
+    """Extract or generate a trace_id for every HTTP request.
+
+    Reads from ``X-Trace-ID`` header; generates a ``uuid4`` if absent.
+    Stores in ``_trace_id_var`` so downstream code (routes, audit log)
+    can retrieve it without threading it through every function signature.
+    """
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        trace_id = request.headers.get("X-Trace-ID", str(uuid.uuid4()))
+        _trace_id_var.set(trace_id)
+        response = await call_next(request)
+        response.headers["X-Trace-ID"] = trace_id
+        return response
 
 
 async def _cleanup_expired_sessions() -> None:
@@ -77,9 +107,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="UniHarness API", version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(TraceContextMiddleware)
+
+# Auth middleware (disabled by default — activated when api_key is set in config)
+from uniharness_api.auth import AuthMiddleware  # noqa: E402
+from uniharness_api.config import load_config  # noqa: E402
+
+_auth = AuthMiddleware(app, api_key=load_config().api_key)
+app.user_middleware.insert(0, app.user_middleware.pop())  # ensure Auth is first
+# Re-register with the configured key
+app.add_middleware(AuthMiddleware, api_key=load_config().api_key)
+
+# Rate limit middleware
+from uniharness_api.rate_limit import RateLimitMiddleware  # noqa: E402
+
+app.add_middleware(RateLimitMiddleware)
+
+# CORS — tightened from "*"; configurable via UNIHARNESS_CORS_ORIGINS env var
+_cors_origins_str = os.environ.get("UNIHARNESS_CORS_ORIGINS", "")
+_cors_origins = (
+    [o.strip() for o in _cors_origins_str.split(",") if o.strip()]
+    if _cors_origins_str
+    else ["http://localhost:3000", "http://localhost:5173", "app://."]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -138,6 +138,69 @@ async def _create_tables_v1(db: aiosqlite.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Audit logger
+# ---------------------------------------------------------------------------
+
+
+class AuditLogger:
+    """Asynchronous audit log writer (fire-and-forget, non-blocking).
+
+    Writes structured audit entries to the ``audit_logs`` table.  Each
+    ``log()`` call spawns an ``asyncio.create_task`` so the caller is
+    never blocked on I/O.
+
+    Usage::
+
+        auditor = AuditLogger()
+        auditor.log("tool_call", "Bash", details='{"command": "ls"}',
+                     trace_id="abc123", conversation_id="conv-1")
+    """
+
+    def log(
+        self,
+        event_type: str,
+        subject: str,
+        *,
+        details: str | None = None,
+        trace_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> None:
+        """Fire-and-forget audit log entry."""
+        asyncio.create_task(
+            self._write(event_type, subject, details=details,
+                        trace_id=trace_id, conversation_id=conversation_id),
+        )
+
+    @staticmethod
+    async def _write(
+        event_type: str,
+        subject: str,
+        *,
+        details: str | None = None,
+        trace_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> None:
+        try:
+            async with get_db() as db:
+                await acquire_write_lock()
+                try:
+                    await db.execute(
+                        """INSERT INTO audit_logs (trace_id, conversation_id, event_type, subject, details)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (trace_id, conversation_id, event_type, subject, details),
+                    )
+                    await db.commit()
+                finally:
+                    release_write_lock()
+        except Exception:
+            logger.exception("Failed to write audit log entry")
+
+
+# Module-level singleton
+audit_logger = AuditLogger()
+
+
+# ---------------------------------------------------------------------------
 # Migration helpers
 # ---------------------------------------------------------------------------
 
