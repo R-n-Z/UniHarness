@@ -202,7 +202,7 @@ def _extract_reasoning_from_chunk(chunk: object) -> str:
 @router.post("/api/chat/{conversation_id}/message")
 async def send_message(conversation_id: str, body: MessageRequest) -> StreamingResponse:
     """Send a message and stream the agent response as SSE."""
-    conv = store.get(conversation_id)
+    conv = await store.get(conversation_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -239,7 +239,7 @@ async def send_message(conversation_id: str, body: MessageRequest) -> StreamingR
                 raise HTTPException(status_code=409, detail=str(exc)) from None
 
     att_dicts = [a.model_dump() for a in body.attachments] if body.attachments else None
-    store.add_message(conversation_id, "user", body.content, attachments=att_dicts)
+    await store.add_message(conversation_id, "user", body.content, attachments=att_dicts)
 
     if conv.title == "New conversation":
         conv.title = body.content[:50].strip()
@@ -262,7 +262,7 @@ async def send_message(conversation_id: str, body: MessageRequest) -> StreamingR
             target_model = next((m for m in cfg.models if m.id == model_id), None)
             supports_image = target_model is not None and "image" in target_model.supported_modalities
 
-            raw_messages = store.get_messages_for_agent(conversation_id)
+            raw_messages = await store.get_messages_for_agent(conversation_id)
             messages = []
             for m in raw_messages:
                 if m["role"] == "user":
@@ -458,7 +458,7 @@ async def send_message(conversation_id: str, body: MessageRequest) -> StreamingR
             blocks.append({"type": "thinking", "text": current_thinking, "startedAt": thinking_started_at, "endedAt": ended})
 
         if full_text or blocks:
-            store.add_message(
+            await store.add_message(
                 conversation_id,
                 "assistant",
                 full_text,
@@ -479,7 +479,7 @@ async def upload_file(conversation_id: str, file: UploadFile = File(...)) -> dic
 
     Returns the destination path inside the computer.
     """
-    conv = store.get(conversation_id)
+    conv = await store.get(conversation_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -537,7 +537,7 @@ async def upload_file(conversation_id: str, file: UploadFile = File(...)) -> dic
 @router.delete("/api/chat/{conversation_id}/upload/{filename}")
 async def delete_uploaded_file(conversation_id: str, filename: str) -> dict[str, str]:
     """Delete a previously uploaded file from local storage and the computer."""
-    conv = store.get(conversation_id)
+    conv = await store.get(conversation_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -584,7 +584,7 @@ async def download_file(
     by the ``PresentToUser`` tool and must reside within the allowed output
     directory for the conversation's mode.
     """
-    conv = store.get(conversation_id)
+    conv = await store.get(conversation_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -826,7 +826,7 @@ async def _preconvert_office_file(
     The result is stored in the PDF cache so the preview endpoint returns
     instantly when the user opens the file.
     """
-    conv = store.get(conversation_id)
+    conv = await store.get(conversation_id)
     if conv is None:
         return
 
@@ -904,7 +904,7 @@ async def preview_office_file(
     PresentToUser emits a .pptx), this returns instantly from cache.
     """
 
-    conv = store.get(conversation_id)
+    conv = await store.get(conversation_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
