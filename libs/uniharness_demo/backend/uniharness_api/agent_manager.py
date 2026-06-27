@@ -48,12 +48,77 @@ class AgentManager:
         self._agent_locks: dict[tuple[str, str], asyncio.Lock] = {}
         # session_name -> (working_dir_source, mount_target)
         self._session_working_dirs: dict[str, tuple[str, str]] = {}
+        # Background health monitor task
+        self._health_monitor_task: asyncio.Task[None] | None = None
+        # Set of keys for computers that failed health checks and need replacement
+        self._dead_computers: set[str] = set()
 
     def conversation_lock(self, conversation_id: str) -> asyncio.Lock:
         """Per-conversation lock to serialise prepare/send/mount operations."""
         if conversation_id not in self._conv_locks:
             self._conv_locks[conversation_id] = asyncio.Lock()
         return self._conv_locks[conversation_id]
+
+    # -- Health monitor -----------------------------------------------------
+
+    async def _health_monitor_loop(self, interval: float = 30) -> None:
+        """Background coroutine: periodically health-check all computers.
+
+        Computers that fail are stopped and removed from the cache so the
+        next request creates a fresh one.  This prevents serving stale
+        connections to dead sandboxes / VMs.
+        """
+        from uniharness.computer.base import health_check
+
+        # Delay first check to let computers fully initialise
+        await asyncio.sleep(interval)
+        while True:
+            try:
+                for key, computer in list(self._computers.items()):
+                    if not health_check(computer):
+                        logger.warning(
+                            "Computer %s failed health check — tearing down", key,
+                        )
+                        try:
+                            await computer.stop()
+                        except Exception:
+                            logger.exception("Error stopping unhealthy computer %s", key)
+                        self._computers.pop(key, None)
+                        self._dead_computers.add(key)
+                        # Clean up cached agents for this computer
+                        agent_keys = [k for k in self._agents if k[1] == key]
+                        for ak in agent_keys:
+                            old = self._agents.pop(ak, None)
+                            self._agent_locks.pop(ak, None)
+                            if old is not None:
+                                try:
+                                    await old.aclose()
+                                except Exception:
+                                    pass
+                    else:
+                        logger.debug("Computer %s health check OK", key)
+            except Exception:
+                logger.exception("Error in health monitor loop")
+            await asyncio.sleep(interval)
+
+    def _start_health_monitor(self) -> None:
+        """Launch the background health monitor if not already running."""
+        if self._health_monitor_task is None or self._health_monitor_task.done():
+            self._health_monitor_task = asyncio.create_task(
+                self._health_monitor_loop(),
+            )
+            logger.info("Health monitor started")
+
+    async def _stop_health_monitor(self) -> None:
+        """Cancel the health monitor task."""
+        if self._health_monitor_task and not self._health_monitor_task.done():
+            self._health_monitor_task.cancel()
+            try:
+                await self._health_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._health_monitor_task = None
+            logger.info("Health monitor stopped")
 
     # ── Computer management ──
 
@@ -420,6 +485,7 @@ class AgentManager:
                 "VM manager not available (Lima not installed?). "
                 "Cowork mode will be unavailable; chat mode still works."
             )
+        self._start_health_monitor()
         logger.info("Agent manager initialized.")
 
     async def ensure_agent(
@@ -470,6 +536,7 @@ class AgentManager:
 
     async def stop(self) -> None:
         """Shut down all agents and computers."""
+        await self._stop_health_monitor()
         for key, agent in self._agents.items():
             logger.info("Closing agent for %s...", key)
             await agent.aclose()

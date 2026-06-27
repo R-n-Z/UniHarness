@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 if sys.platform == "win32":
@@ -94,5 +95,40 @@ app.include_router(skills.router)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    """Health check endpoint."""
+    """Liveness check — always returns ok if the process is running."""
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready() -> dict:
+    """Readiness check — verifies database and computer availability.
+
+    Returns HTTP 503 if any critical dependency is unavailable.
+    """
+    import aiosqlite
+
+    from fastapi import Response
+
+    from uniharness_api.paths import db_path
+
+    status: dict = {"status": "ready", "database": "ok", "computers": {}}
+
+    # Database connectivity
+    try:
+        db = await aiosqlite.connect(str(db_path()))
+        await db.execute("SELECT 1")
+        await db.close()
+    except Exception:
+        status["database"] = "unavailable"
+        status["status"] = "not_ready"
+
+    # Active computers
+    for key, computer in agent_manager._computers.items():
+        from uniharness.computer.base import health_check
+
+        status["computers"][key] = "healthy" if health_check(computer) else "unhealthy"
+
+    if status["status"] != "ready":
+        return Response(content=json.dumps(status), media_type="application/json", status_code=503)
+
+    return status
